@@ -4,16 +4,108 @@ const _sb = createClient(
   import.meta.env.VITE_SUPABASE_URL,
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
+
 const _storage = {
-  get: async (key) => {
-    const { data } = await _sb.from('tracker_state').select('value').eq('id', key).maybeSingle()
-    return data ? { value: data.value } : null
+  async migrateIfNeeded() {
+    const { data: existing } = await _sb.from('projects').select('id').limit(1)
+    if (existing?.length > 0) return // Already migrated
+
+    const { data: oldData } = await _sb.from('tracker_state').select('value').eq('id', 'ano-projekti-2026-v2').maybeSingle()
+    if (!oldData?.value) return
+
+    const parsed = JSON.parse(oldData.value)
+    const projects = parsed.projects || parsed
+    console.log(`Migrating ${projects.length} projects from old format...`)
+
+    for (const p of projects) {
+      await this.saveProject(p)
+      if (p.faze?.length) {
+        await this.saveFaze(p.id, p.faze.map((f, i) => ({ ...f, id: `${p.id}_faze_${f.id}` })))
+      }
+    }
+    console.log("Migration complete!")
   },
-  set: async (key, value) => {
-    const { error } = await _sb.from('tracker_state')
-      .upsert({ id: key, value, updated_at: new Date().toISOString() }, { onConflict: 'id' })
+
+  async loadProjects() {
+    // Check if migration is needed
+    await this.migrateIfNeeded()
+
+    const { data: projects, error: pErr } = await _sb
+      .from('projects')
+      .select('*')
+      .is('deleted_at', null)
+    if (pErr) throw pErr
+
+    const { data: faze, error: fErr } = await _sb
+      .from('project_faze')
+      .select('*')
+    if (fErr) throw fErr
+
+    const fazeMap = {}
+    ;(faze || []).forEach(f => {
+      if (!fazeMap[f.project_id]) fazeMap[f.project_id] = []
+      const pid = f.id.replace('_faze_', '_')
+      fazeMap[f.project_id].push({ id: parseInt(f.id.split('_faze_')[1]) || f.id, naziv: f.naziv, status: f.status })
+    })
+
+    return (projects || []).map(p => ({
+      id: p.id,
+      code: p.code,
+      name: p.name,
+      category: p.category || '',
+      categoryColor: p.category_color || '#00A3E0',
+      svrha: p.svrha || '',
+      cilj: p.cilj || '',
+      tim: p.tim || [],
+      start: p.start_date || '—',
+      end: p.end_date || '—',
+      trajanje: p.trajanje || '—',
+      napomene: p.napomene || '',
+      ukupniStatus: p.ukupni_status || 'nije_zapoceto',
+      naPotezu: p.na_potezu || null,
+      linkovi: p.linkovi || [],
+      faze: fazeMap[p.id] || []
+    }))
+  },
+
+  async saveProject(project) {
+    const { error } = await _sb.from('projects').upsert({
+      id: project.id,
+      code: project.code,
+      name: project.name,
+      category: project.category,
+      category_color: project.categoryColor,
+      svrha: project.svrha,
+      cilj: project.cilj,
+      tim: project.tim,
+      start_date: project.start,
+      end_date: project.end,
+      trajanje: project.trajanje,
+      napomene: project.napomene,
+      ukupni_status: project.ukupniStatus,
+      na_potezu: project.naPotezu,
+      linkovi: project.linkovi,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'id' })
     if (error) throw error
-    return { key, value }
+  },
+
+  async saveFaze(projectId, faze) {
+    await _sb.from('project_faze').delete().eq('project_id', projectId)
+    if (faze.length === 0) return
+    const toInsert = faze.map((f, idx) => ({
+      id: `${projectId}_faze_${f.id}`,
+      project_id: projectId,
+      naziv: f.naziv,
+      status: f.status || 'nije_zapoceto',
+      sort_order: idx
+    }))
+    const { error } = await _sb.from('project_faze').upsert(toInsert, { onConflict: 'id' })
+    if (error) throw error
+  },
+
+  async deleteProject(projectId) {
+    await _sb.from('projects').update({ deleted_at: new Date().toISOString() }).eq('id', projectId)
   }
 }
 
@@ -234,7 +326,6 @@ const ALL_PROJECTS = [
 ];
 
 const CANONICAL_IDS = new Set(ALL_PROJECTS.map(p => p.id));
-const STORAGE_KEY = "ano-projekti-2026-v2";
 
 const statusConfig = {
   nije_zapoceto: { label: "Nije započeto", color: ANO.muted,  bg: "#EFF3FF", dot: ANO.muted },
@@ -249,116 +340,65 @@ const strToColor = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = s.
 const FIXED_COLORS = { Luka: ANO.blue, Pero: ANO.navy, Anka: "#7B3FA0", Rusmir: "#1E7C4D", Anđela: "#C0392B", Marija: ANO.accent, Milena: "#B07D00", Ivan: "#1A6B40", Matija: "#8B5A2B" };
 const avatarColor = (n) => FIXED_COLORS[n] || strToColor(n);
 
-// ── STORAGE ───────────────────────────────────────────────────────────────────
-// Serialise only the mutable fields we need to persist
-function extractMutableState(projects) {
-  return projects.map(p => {
-    // Always save faze statuses + status fields
-    const base = {
-      id: p.id,
-      ukupniStatus: p.ukupniStatus,
-      napomene: p.napomene,
-      postotak: p.postotak,
-      faze: (p.faze || []).map(f => ({ id: f.id, naziv: f.naziv, status: f.status })),
-      naPotezu: p.naPotezu ?? null,
-      linkovi: p.linkovi ?? [],
-      // Save all user-editable display fields so UI edits survive code updates
-      name: p.name,
-      code: p.code,
-      category: p.category,
-      categoryColor: p.categoryColor,
-      svrha: p.svrha,
-      cilj: p.cilj,
-      tim: p.tim,
-      start: p.start,
-      end: p.end,
-      trajanje: p.trajanje,
-    };
-    // For non-canonical projects save full data so nothing is lost
-    if (!CANONICAL_IDS.has(p.id)) return { ...p, ...base };
-    return base;
-  });
-}
+function mergeWithCanonical(savedProjects) {
+  if (!savedProjects || !savedProjects.length) {
+    return ALL_PROJECTS.map(p => ({ ...p, postotak: 0 }))
+  }
 
-function mergeWithSaved(saved, deletedIds = []) {
-  if (!saved || !saved.length) return ALL_PROJECTS.filter(p => !deletedIds.includes(p.id));
+  const savedMap = {}
+  savedProjects.forEach(s => { savedMap[s.id] = s })
 
-  const deletedSet = new Set(deletedIds);
-  const savedMap = {};
-  saved.forEach(s => { savedMap[s.id] = s; });
+  const merged = ALL_PROJECTS.map(canonical => {
+    const s = savedMap[canonical.id]
+    if (!s) return { ...canonical, postotak: 0 }
 
-  // Canonical projects — use saved values for everything the user can edit,
-  // fall back to canonical defaults only for fields not yet in storage
-  const merged = ALL_PROJECTS.filter(p => !deletedSet.has(p.id)).map(canonical => {
-    const s = savedMap[canonical.id];
-    if (!s) return canonical;
-
-    // Merge faze: canonical defines structure, saved defines statuses + any renamed activity
-    const savedFazeMap = {};
-    (s.faze || []).forEach(f => { savedFazeMap[f.id] = f; });
-    const mergedFaze = canonical.faze.map(f => ({
-      ...f,
-      naziv: savedFazeMap[f.id]?.naziv ?? f.naziv,  // user may have renamed a faza
-      status: savedFazeMap[f.id]?.status ?? f.status,
-    }));
-    // Also keep any extra faze the user added (id not in canonical)
-    const canonicalFazeIds = new Set(canonical.faze.map(f => f.id));
-    (s.faze || []).filter(f => !canonicalFazeIds.has(f.id)).forEach(f => mergedFaze.push(f));
-
-    const done = mergedFaze.filter(f => f.status === "zavrseno").length;
-    const postotak = mergedFaze.length ? Math.round((done / mergedFaze.length) * 100) : 0;
+    const done = (s.faze || []).filter(f => f.status === "zavrseno").length
+    const postotak = s.faze?.length ? Math.round((done / s.faze.length) * 100) : 0
 
     return {
       ...canonical,
-      // User-editable display fields — prefer saved value if it exists
-      name:          s.name          ?? canonical.name,
-      code:          s.code          ?? canonical.code,
-      category:      s.category      ?? canonical.category,
-      categoryColor: s.categoryColor ?? canonical.categoryColor,
-      svrha:         s.svrha         ?? canonical.svrha,
-      cilj:          s.cilj          ?? canonical.cilj,
-      tim:           s.tim           ?? canonical.tim,
-      start:         s.start         ?? canonical.start,
-      end:           s.end           ?? canonical.end,
-      trajanje:      s.trajanje      ?? canonical.trajanje,
-      // Status / progress
-      faze:          mergedFaze,
-      napomene:      s.napomene      ?? canonical.napomene,
-      ukupniStatus:  s.ukupniStatus  ?? canonical.ukupniStatus,
+      name: s.name || canonical.name,
+      code: s.code || canonical.code,
+      category: s.category || canonical.category,
+      categoryColor: s.categoryColor || canonical.categoryColor,
+      svrha: s.svrha || canonical.svrha,
+      cilj: s.cilj || canonical.cilj,
+      tim: s.tim || canonical.tim,
+      start: s.start || canonical.start,
+      end: s.end || canonical.end,
+      trajanje: s.trajanje || canonical.trajanje,
+      faze: s.faze || canonical.faze,
+      napomene: s.napomene || '',
+      ukupniStatus: s.ukupniStatus || 'nije_zapoceto',
       postotak,
-      naPotezu:      s.naPotezu      ?? null,
-      linkovi:       s.linkovi       ?? canonical.linkovi ?? [],
-    };
-  });
+      naPotezu: s.naPotezu || null,
+      linkovi: s.linkovi || [],
+    }
+  })
 
-  // Extra user-created projects (not in ALL_PROJECTS)
-  const extras = saved.filter(s => !CANONICAL_IDS.has(s.id) && !deletedSet.has(s.id));
-  return [...merged, ...extras];
+  const extras = savedProjects.filter(s => !CANONICAL_IDS.has(s.id))
+  return [...merged, ...extras]
 }
 
 async function loadFromStorage() {
   try {
-    const result = await _storage.get(STORAGE_KEY);
-    if (result && result.value) {
-      const parsed = JSON.parse(result.value);
-      // Handle legacy format (plain array) and new format ({projects, deletedIds})
-      if (Array.isArray(parsed)) return { projects: parsed, deletedIds: [] };
-      return { projects: parsed.projects || [], deletedIds: parsed.deletedIds || [] };
-    }
+    const projects = await _storage.loadProjects()
+    return { projects, deletedIds: [] }
   } catch (err) {
-    console.warn("Storage load failed:", err);
+    console.warn("Storage load failed:", err)
+    return null
   }
-  return null;
 }
 
-async function saveToStorage(data, deletedIds = []) {
+async function saveToStorage(projects) {
   try {
-    const payload = JSON.stringify({ projects: extractMutableState(data), deletedIds });
-    const result = await _storage.set(STORAGE_KEY, payload);
-    if (!result) throw new Error("storage.set returned null");
+    for (const p of projects) {
+      await _storage.saveProject(p)
+      await _storage.saveFaze(p.id, p.faze || [])
+    }
   } catch (err) {
-    console.error("saveToStorage failed:", err);
-    throw err; // re-throw so callers can show error status
+    console.error("saveToStorage failed:", err)
+    throw err
   }
 }
 
@@ -506,7 +546,6 @@ export default function App() {
   const [lastSaved, setLastSaved]           = useState(null);
   const [editingProject, setEditingProject] = useState(false);
   const [editForm, setEditForm]             = useState(null);
-  const [deletedIds, setDeletedIds]         = useState([]);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [viewMode, setViewMode]             = useState("kanban"); // "kanban" | "timeline" | "team"
   const [editingNaPotezu, setEditingNaPotezu] = useState(null);
@@ -520,15 +559,13 @@ export default function App() {
   // Debounce timer ref – we batch rapid changes into one write
   const saveTimer   = useRef(null);
   const pendingData = useRef(null);
-  const projectsRef  = useRef(null); // always mirrors latest projects for sync access
-  const deletedIdsRef = useRef([]);  // mirrors deletedIds for sync access in debounced save
+  const projectsRef  = useRef(null);
 
   // ── Load on mount ──────────────────────────────────────────────────────────
   useEffect(() => {
     loadFromStorage().then(loaded => {
-      const { projects: saved, deletedIds: savedDeleted } = loaded || { projects: null, deletedIds: [] };
-      setDeletedIds(savedDeleted || []);
-      const initial = mergeWithSaved(saved, savedDeleted || []);
+      const { projects: saved } = loaded || { projects: null };
+      const initial = mergeWithCanonical(saved);
       projectsRef.current = initial;
       setProjects(initial);
     });
@@ -539,19 +576,16 @@ export default function App() {
   const isFirstLoad = useRef(true);
   useEffect(() => {
     if (projects === null) return;
-    projectsRef.current = projects;   // keep ref in sync
-    deletedIdsRef.current = deletedIds; // keep ref in sync
-    if (isFirstLoad.current) { isFirstLoad.current = false; return; } // skip initial hydration
+    projectsRef.current = projects;
+    if (isFirstLoad.current) { isFirstLoad.current = false; return; }
 
-    // Stage the data and show "saving" immediately
     pendingData.current = projects;
     setSaveStatus("saving");
 
-    // Debounce: wait 600ms of inactivity before actually writing
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await saveToStorage(pendingData.current, deletedIdsRef.current);
+        await saveToStorage(pendingData.current);
         const now = new Date();
         setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`);
         setSaveStatus("saved");
@@ -564,7 +598,7 @@ export default function App() {
     }, 600);
 
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [projects, deletedIds]);
+  }, [projects]);
 
   // ── Project mutation helpers ───────────────────────────────────────────────
   const recalc = (p) => {
@@ -581,7 +615,7 @@ export default function App() {
     projectsRef.current = newProjects;
     setProjects(newProjects);
     setSaveStatus("saving");
-    saveToStorage(newProjects, deletedIdsRef.current)
+    saveToStorage(newProjects)
       .then(() => { const now = new Date(); setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`); setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2000); })
       .catch(() => setSaveStatus("error"));
   };
@@ -591,7 +625,7 @@ export default function App() {
     projectsRef.current = newProjects;
     setProjects(newProjects);
     setSaveStatus("saving");
-    saveToStorage(newProjects, deletedIdsRef.current)
+    saveToStorage(newProjects)
       .then(() => { const now = new Date(); setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`); setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2000); })
       .catch(() => setSaveStatus("error"));
   };
@@ -603,7 +637,7 @@ export default function App() {
     setProjects(newProjects);
     setEditingNapomena(false);
     setSaveStatus("saving");
-    saveToStorage(newProjects, deletedIdsRef.current)
+    saveToStorage(newProjects)
       .then(() => { const now = new Date(); setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`); setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2000); })
       .catch(() => setSaveStatus("error"));
   };
@@ -618,7 +652,7 @@ export default function App() {
     setModalInitialCode("");
     // Save immediately — don't rely on debounce
     setSaveStatus("saving");
-    saveToStorage(newProjects, deletedIdsRef.current)
+    saveToStorage(newProjects)
       .then(() => {
         const now = new Date();
         setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`);
@@ -629,11 +663,11 @@ export default function App() {
     setTimeout(() => { setSelectedId(fullProject.id); setEditNapomena(""); setEditingNapomena(false); }, 50);
   };
 
-  const deleteProject = (id) => {
-    if (CANONICAL_IDS.has(id)) {
-      const newDeleted = [...deletedIds, id];
-      setDeletedIds(newDeleted);
-      deletedIdsRef.current = newDeleted;
+  const deleteProject = async (id) => {
+    try {
+      await _storage.deleteProject(id)
+    } catch (err) {
+      console.error("Delete failed:", err)
     }
     setProjects(prev => prev.filter(p => p.id !== id));
     setConfirmDeleteId(null);
@@ -710,7 +744,7 @@ export default function App() {
     setEditingProject(false);
     setEditForm(null);
     setSaveStatus("saving");
-    saveToStorage(newProjects, deletedIdsRef.current)
+    saveToStorage(newProjects)
       .then(() => { const now = new Date(); setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`); setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2000); })
       .catch(() => setSaveStatus("error"));
   };
@@ -765,7 +799,7 @@ export default function App() {
     setProjects(newProjects);
     // Save immediately — don't rely on debounce for naPotezu edits
     setSaveStatus("saving");
-    saveToStorage(newProjects, deletedIdsRef.current)
+    saveToStorage(newProjects)
       .then(() => {
         const now = new Date();
         setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`);
@@ -1558,7 +1592,7 @@ export default function App() {
                                 projectsRef.current = newProjects;
                                 setProjects(newProjects);
                                 setSaveStatus("saving");
-                                saveToStorage(newProjects, deletedIdsRef.current)
+                                saveToStorage(newProjects)
                                   .then(() => {
                                     const now = new Date();
                                     setLastSaved(`${now.getHours().toString().padStart(2,"0")}:${now.getMinutes().toString().padStart(2,"0")}`);
