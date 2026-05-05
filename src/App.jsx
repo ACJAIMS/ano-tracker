@@ -43,9 +43,12 @@ const _storage = {
 
     const fazeMap = {}
     ;(faze || []).forEach(f => {
-      if (!fazeMap[f.project_id]) fazeMap[f.project_id] = []
-      const pid = f.id.replace('_faze_', '_')
-      fazeMap[f.project_id].push({ id: parseInt(f.id.split('_faze_')[1]) || f.id, naziv: f.naziv, status: f.status })
+      if (!fazeMap[f.project_id]) fazeMap[f.project_id] = {}
+      const fazeId = parseInt(f.id.split('_faze_').pop()) || f.id
+      const existing = fazeMap[f.project_id][fazeId]
+      if (!existing || f.status !== 'nije_zapoceto') {
+        fazeMap[f.project_id][fazeId] = { id: fazeId, naziv: f.naziv, status: f.status }
+      }
     })
 
     return (projects || []).map(p => ({
@@ -64,7 +67,7 @@ const _storage = {
       ukupniStatus: p.ukupni_status || 'nije_zapoceto',
       naPotezu: p.na_potezu || null,
       linkovi: p.linkovi || [],
-      faze: fazeMap[p.id] || []
+      faze: Object.values(fazeMap[p.id] || {}).sort((a, b) => a.id - b.id)
     }))
   },
 
@@ -569,6 +572,8 @@ export default function App() {
       const initial = mergeWithCanonical(saved);
       projectsRef.current = initial;
       setProjects(initial);
+      // Clean up any duplicate faze in DB after deduplication on load
+      saveToStorage(initial).catch(() => {});
     });
   }, []);
 
