@@ -47,7 +47,7 @@ const _storage = {
       const fazeId = parseInt(f.id.split('_faze_').pop()) || f.id
       const existing = fazeMap[f.project_id][fazeId]
       if (!existing || f.status !== 'nije_zapoceto') {
-        fazeMap[f.project_id][fazeId] = { id: fazeId, naziv: f.naziv, status: f.status }
+        fazeMap[f.project_id][fazeId] = { id: fazeId, naziv: f.naziv, status: f.status, _sort: f.sort_order ?? 999 }
       }
     })
 
@@ -67,7 +67,7 @@ const _storage = {
       ukupniStatus: p.ukupni_status || 'nije_zapoceto',
       naPotezu: p.na_potezu || null,
       linkovi: p.linkovi || [],
-      faze: Object.values(fazeMap[p.id] || {}).sort((a, b) => a.id - b.id)
+      faze: Object.values(fazeMap[p.id] || {}).sort((a, b) => a._sort - b._sort).map(({ _sort, ...f }) => f)
     }))
   },
 
