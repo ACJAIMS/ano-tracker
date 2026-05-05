@@ -1194,7 +1194,7 @@ export default function App() {
           );
         })()}
 
-        {!selected && (() => {
+        {!selected && viewMode === "kanban" && (() => {
           /* PROJECT CARDS — grouped by skupina */
           const GROUPS = [
             { key: "I",   label: "Skupina I.",   subtitle: "Automatizacija i integracija sustava", accentColor: ANO.accent },
