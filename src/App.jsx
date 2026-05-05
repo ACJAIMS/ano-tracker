@@ -70,7 +70,7 @@ const _storage = {
 
   async saveProject(project) {
     const { error } = await _sb.from('projects').upsert({
-      id: project.id,
+      id: String(project.id),
       code: project.code,
       name: project.name,
       category: project.category,
@@ -91,11 +91,12 @@ const _storage = {
   },
 
   async saveFaze(projectId, faze) {
-    await _sb.from('project_faze').delete().eq('project_id', projectId)
+    const pid = String(projectId)
+    await _sb.from('project_faze').delete().eq('project_id', pid)
     if (faze.length === 0) return
     const toInsert = faze.map((f, idx) => ({
-      id: `${projectId}_faze_${f.id}`,
-      project_id: projectId,
+      id: `${pid}_faze_${f.id}`,
+      project_id: pid,
       naziv: f.naziv,
       status: f.status || 'nije_zapoceto',
       sort_order: idx
@@ -105,7 +106,7 @@ const _storage = {
   },
 
   async deleteProject(projectId) {
-    await _sb.from('projects').update({ deleted_at: new Date().toISOString() }).eq('id', projectId)
+    await _sb.from('projects').update({ deleted_at: new Date().toISOString() }).eq('id', String(projectId))
   }
 }
 
