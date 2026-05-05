@@ -325,7 +325,7 @@ const ALL_PROJECTS = [
   },
 ];
 
-const CANONICAL_IDS = new Set(ALL_PROJECTS.map(p => p.id));
+const CANONICAL_IDS = new Set(ALL_PROJECTS.map(p => String(p.id)));
 
 const statusConfig = {
   nije_zapoceto: { label: "Nije započeto", color: ANO.muted,  bg: "#EFF3FF", dot: ANO.muted },
@@ -346,10 +346,10 @@ function mergeWithCanonical(savedProjects) {
   }
 
   const savedMap = {}
-  savedProjects.forEach(s => { savedMap[s.id] = s })
+  savedProjects.forEach(s => { savedMap[String(s.id)] = s })
 
   const merged = ALL_PROJECTS.map(canonical => {
-    const s = savedMap[canonical.id]
+    const s = savedMap[String(canonical.id)]
     if (!s) return { ...canonical, postotak: 0 }
 
     const done = (s.faze || []).filter(f => f.status === "zavrseno").length
@@ -376,7 +376,7 @@ function mergeWithCanonical(savedProjects) {
     }
   })
 
-  const extras = savedProjects.filter(s => !CANONICAL_IDS.has(s.id))
+  const extras = savedProjects.filter(s => !CANONICAL_IDS.has(String(s.id)))
   return [...merged, ...extras]
 }
 
